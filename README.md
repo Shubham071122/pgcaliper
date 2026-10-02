@@ -76,7 +76,7 @@ In multi-tenant SaaS, ERPs, and database platforms, managing user storage (e.g. 
 
 ### Option 1: One-Line Curl Installer (Linux / macOS)
 ```bash
-curl -sSL https://raw.githubusercontent.com/Shubham071122/pgcaliper/main/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/Shubham071122/pgcaliper/master/install.sh | sudo bash
 ```
 
 ### Option 2: Pre-compiled Binary Release
