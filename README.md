@@ -1,42 +1,42 @@
-# 📐 pgcaliper
+# pgcaliper
 
-> Enterprise-grade, ultra-lightweight PostgreSQL storage metering, telemetry, and multi-tenant quota engine written in Go.
+> Enterprise-grade PostgreSQL storage metering, telemetry, and multi-tenant quota engine written in Go.
 
 `pgcaliper` operates as an independent, non-intrusive database telemetry agent. It inspects low-level PostgreSQL table heaps, TOAST pages, and secondary indexes without locking rows or degrading active OLTP transactions, recording structured snapshot telemetry directly into a dedicated database ledger (`_pgcaliper`).
 
 ---
 
-## 📑 Table of Contents
-1. [Why pgcaliper?](#-why-pgcaliper)
-2. [Architecture Overview](#-architecture-overview)
-3. [Installation](#-installation)
-4. [Interactive Setup Wizard (`pgcaliper init`)](#-interactive-setup-wizard-pgcaliper-init)
-5. [CLI Commands Reference](#-cli-commands-reference)
-6. [Granular Table Breakdown (`pgcaliper details`)](#-granular-table-breakdown-pgcaliper-details)
-7. [Running 24/7 as a Background Daemon (`pgcaliper daemon`)](#-running-247-as-a-background-daemon-pgcaliper-daemon)
-8. [Measurement Strategies (`pgcaliper.yaml`)](#-measurement-strategies-pgcaliperyaml)
-9. [Event Alerting & Webhooks (Slack/Discord/Custom)](#-event-alerting--webhooks-slackdiscordcustom)
-10. [Querying Telemetry in Your Application / SaaS](#-querying-telemetry-in-your-application--saas)
-11. [Clean Uninstallation (`pgcaliper uninstall`)](#-clean-uninstallation-pgcaliper-uninstall)
-12. [Local Development & Docker Testing](#-local-development--docker-testing)
+## Table of Contents
+1. [Overview](#overview)
+2. [Architecture](#architecture)
+3. [Installation](#installation)
+4. [Interactive Setup (`pgcaliper init`)](#interactive-setup-pgcaliper-init)
+5. [CLI Commands Reference](#cli-commands-reference)
+6. [Granular Table Breakdown (`pgcaliper details`)](#granular-table-breakdown-pgcaliper-details)
+7. [Running 24/7 as a Background Daemon (`pgcaliper daemon`)](#running-247-as-a-background-daemon-pgcaliper-daemon)
+8. [Measurement Strategies (`pgcaliper.yaml`)](#measurement-strategies-pgcaliperyaml)
+9. [Event Alerting & Webhooks](#event-alerting--webhooks)
+10. [Application Integration Recipes](#application-integration-recipes)
+11. [Uninstallation](#uninstallation)
+12. [License](#license)
 
 ---
 
-## 💡 Why pgcaliper?
+## Overview
 
-In multi-tenant SaaS, ERPs, and database platforms, managing user storage (e.g. giving 15 GB free and charging for extra) has historically been painful:
+In multi-tenant SaaS platforms, ERPs, and database clusters, managing storage quotas (e.g. enforcing a 15 GB tier limit) is typically challenging:
 
-- **Running live `SUM(pg_column_size)` on API requests** causes severe CPU spikes and blocks active user transactions.
-- **Pure row counts are misleading**: In PostgreSQL, secondary indexes (B-Tree, GIN) and out-of-line TOAST data (compressed JSONB, XML, PDF text) often consume **40% to 70% of total storage**.
-- **External billing tools** (like Stripe or Lago) do not know how PostgreSQL stores bytes on disk.
+- **Running live `SUM(pg_column_size)` on API requests** causes CPU spikes and blocks active user transactions.
+- **Row counts are misleading**: Secondary indexes (B-Tree, GIN) and out-of-line TOAST data (compressed JSONB, text) often consume **40% to 70% of total disk space**.
+- **External billing tools** (such as Stripe or Lago) have no direct visibility into on-disk storage layout.
 
-**`pgcaliper` solves this** by running as a lightweight daemon or sidecar. It queries PostgreSQL's storage catalogs with strict statement timeouts, separates Heap vs Index footprints, evaluates quotas, and records historical snapshots with zero application coupling.
+`pgcaliper` addresses this by running as a lightweight daemon or sidecar. It queries PostgreSQL's storage catalogs with strict statement timeouts, distinguishes Heap vs Index footprints, evaluates quota thresholds, and records historical snapshots with zero application coupling.
 
 ---
 
-## 🏛️ Architecture Overview
+## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                            PostgreSQL Server                                │
 │                                                                             │
@@ -72,15 +72,15 @@ In multi-tenant SaaS, ERPs, and database platforms, managing user storage (e.g. 
 
 ---
 
-## 📦 Installation
+## Installation
 
-### Option 1: One-Line Curl Installer (Linux / macOS)
+### Option 1: One-Line Installer (Linux / macOS)
 ```bash
-curl -sSL https://raw.githubusercontent.com/Shubham071122/pgcaliper/master/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/Shubham071122/pgcaliper/master/install.sh | bash
 ```
 
 ### Option 2: Pre-compiled Binary Release
-Download the binary for your OS and architecture from GitHub Releases:
+Download the binary directly from GitHub Releases:
 ```bash
 # Example for Linux x86_64
 curl -L https://github.com/Shubham071122/pgcaliper/releases/latest/download/pgcaliper-linux-amd64 -o pgcaliper
@@ -88,7 +88,12 @@ chmod +x pgcaliper
 sudo mv pgcaliper /usr/local/bin/
 ```
 
-### Option 3: Build from Source (Go 1.22+)
+### Option 3: Go Install
+```bash
+go install github.com/Shubham071122/pgcaliper/cmd/pgcaliper@latest
+```
+
+### Option 4: Build from Source (Go 1.22+)
 ```bash
 git clone https://github.com/Shubham071122/pgcaliper.git
 cd pgcaliper
@@ -97,42 +102,40 @@ go build -o bin/pgcaliper ./cmd/pgcaliper
 
 ---
 
-## 🧙‍♂️ Interactive Setup Wizard (`pgcaliper init`)
+## Interactive Setup (`pgcaliper init`)
 
-To configure `pgcaliper` without writing YAML manually, run:
+To generate a working configuration with live PostgreSQL connection testing:
 
 ```bash
 pgcaliper init
 ```
 
-*The wizard tests your PostgreSQL connection live and generates `pgcaliper.yaml`.*
-
 ---
 
-## 💻 CLI Commands Reference
+## CLI Commands Reference
 
 | Command | Description |
 | :--- | :--- |
 | `pgcaliper init` | Interactive setup wizard with live PostgreSQL connection validation |
-| `pgcaliper scan` | Immediate storage calibration, batch snapshot persistence & table output |
-| `pgcaliper daemon` | 24/7 background scheduler (Duration or standard Cron + Retention Trimmer) |
-| `pgcaliper status` | Fast lookup of latest tenant metrics directly from DB ledger |
+| `pgcaliper scan` | Immediate storage calibration, batch snapshot persistence, and table output |
+| `pgcaliper daemon` | 24/7 background scheduler (Duration or Cron + Retention Trimmer) |
+| `pgcaliper status` | Fast lookup of latest tenant metrics directly from the DB ledger |
 | `pgcaliper details --tenant=<name>` | Granular table-by-table breakdown with heap vs index ratios |
 | `pgcaliper export [--format=json\|csv]` | Export telemetry records to stdout or file (`--output=report.json`) |
 | `pgcaliper uninstall` | Clean zero-trace drop of `_pgcaliper` schema from database |
-| `pgcaliper help [command]` | Display built-in help and real-world examples |
+| `pgcaliper help [command]` | Display built-in help and command examples |
 
 ---
 
-## 📁 Granular Table Breakdown (`pgcaliper details`)
+## Granular Table Breakdown (`pgcaliper details`)
 
 Inspect which specific tables and secondary indexes are consuming a tenant's quota:
 
 ```bash
-./bin/pgcaliper details --tenant=tenant_acme
+pgcaliper details --tenant=tenant_acme
 ```
 
-**Output:**
+**Example Output:**
 ```text
   › Granular Breakdown for Tenant: tenant_acme (25.42 MB total, 15.00 GB limit)
      • Capacity: [░░░░░░░░░░]   0.2% | Status: ● ACTIVE | Captured: 2026-10-02 12:40:04
@@ -145,12 +148,12 @@ customers                        792.00 KB       936.00 KB         1.69 MB      
 
 ---
 
-## 🕒 Running 24/7 as a Background Daemon (`pgcaliper daemon`)
+## Running 24/7 as a Background Daemon (`pgcaliper daemon`)
 
-Supports human durations (e.g. `15m`, `1h`, `24h`) and standard 5-part cron expressions (`0 * * * *`, `*/30 * * * *`, `@daily`):
+Supports standard durations (`15m`, `1h`, `24h`) and 5-part cron expressions (`0 * * * *`, `*/30 * * * *`):
 
 ```bash
-./bin/pgcaliper daemon --config=pgcaliper.yaml
+pgcaliper daemon --config=pgcaliper.yaml
 ```
 
 ### Production `systemd` Service (`/etc/systemd/system/pgcaliper.service`):
@@ -178,11 +181,11 @@ sudo systemctl enable --now pgcaliper
 
 ---
 
-## ⚙️ Measurement Strategies (`pgcaliper.yaml`)
+## Measurement Strategies (`pgcaliper.yaml`)
 
-`pgcaliper` supports 3 configurable measurement strategies to match any database architecture:
+`pgcaliper` supports 3 measurement strategies to match various database topologies:
 
-### Mode 1: Multi-Tenant Schemas (Recommended for B2B SaaS & ERP)
+### Strategy 1: Multi-Tenant Schemas (SaaS & ERP)
 ```yaml
 version: "1"
 
@@ -192,11 +195,11 @@ database:
   statement_timeout: "10s"
 
 schedule:
-  interval: "15m"      # "15m", "1h", "24h" or standard cron "0 * * * *"
-  retention_days: 90   # Auto-purges old snapshot records older than 90 days
+  interval: "15m"      # "15m", "1h", "24h" or cron "0 * * * *"
+  retention_days: 90   # Auto-purges snapshot records older than 90 days
 
 storage:
-  schema: "_pgcaliper" # Schema name created inside PostgreSQL
+  schema: "_pgcaliper" # Internal schema created inside PostgreSQL
 
 strategy:
   mode: "schema"
@@ -207,14 +210,14 @@ engine:
   concurrency: 4
 ```
 
-### Mode 2: Database Fleet (DB-per-Tenant)
+### Strategy 2: Database Fleet (DB-per-Tenant)
 ```yaml
 strategy:
   mode: "database"
   default_quota_bytes: 16106127360 # 15 GB per DB
 ```
 
-### Mode 3: Custom Domain Table Groups
+### Strategy 3: Custom Domain Table Groups
 ```yaml
 strategy:
   mode: "custom_group"
@@ -228,9 +231,9 @@ strategy:
 
 ---
 
-## 🔔 Event Alerting & Webhooks (Slack/Discord/Custom)
+## Event Alerting & Webhooks
 
-Configure real-time notifications when tenants reach storage thresholds:
+Configure real-time notifications for threshold transitions:
 
 ```yaml
 alerts:
@@ -242,12 +245,11 @@ alerts:
 
 ---
 
-## 📊 Querying Telemetry in Your Application / SaaS
+## Application Integration Recipes
 
-Your application backend (Node.js, Go, Python, PHP, Ruby) can query `_pgcaliper` directly for billing and UI dashboards:
+Application backends can query `_pgcaliper` directly for billing and customer dashboards:
 
 ```sql
--- Query latest storage usage per tenant for application dashboards
 SELECT 
     group_id AS tenant_id,
     pg_size_pretty(total_bytes) AS total_storage_used,
@@ -264,32 +266,20 @@ LIMIT 1;
 
 ---
 
-## 🧹 Clean Uninstallation (`pgcaliper uninstall`)
+## Uninstallation
+
+To remove all `pgcaliper` metadata cleanly:
 
 ```bash
 pgcaliper uninstall --config=pgcaliper.yaml
 ```
+
 - Prompts for confirmation.
 - Executes `DROP SCHEMA IF EXISTS _pgcaliper CASCADE;`.
-- Leaves your user tables and application data completely untouched.
+- Leaves your user tables and application data untouched.
 
 ---
 
-## 🧪 Local Development & Docker Testing
+## License
 
-```bash
-# 1. Start test Postgres container (seeded with multi-tenant data)
-docker compose -f test/docker-compose.yml up -d
-
-# 2. Build binary
-go build -o bin/pgcaliper ./cmd/pgcaliper
-
-# 3. Run scan
-./bin/pgcaliper scan
-
-# 4. Check details
-./bin/pgcaliper details --tenant=tenant_acme
-
-# 5. Export JSON
-./bin/pgcaliper export --format=json
-```
+This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
