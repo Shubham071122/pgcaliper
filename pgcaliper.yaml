@@ -1,0 +1,27 @@
+version: "1"
+
+database:
+  url: "postgres://postgres:password123@localhost:5439/erp_enterprise_db?sslmode=disable"
+  safe_mode_read_replica: true
+  statement_timeout: "10s"
+
+schedule:
+  interval: "15m"
+  retention_days: 90
+
+storage:
+  schema: "_pgcaliper"
+
+strategy:
+  mode: "schema"
+  schema_pattern: "tenant_.*|org_.*"
+  default_quota_bytes: 16106127360 # 15.00 GB
+
+alerts:
+  enabled: false
+  url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+  format: "slack" # "slack", "discord", "generic"
+  on_events: ["WARN_80", "CRITICAL_95", "EXCEEDED"]
+
+engine:
+  concurrency: 4
