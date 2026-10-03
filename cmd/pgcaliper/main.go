@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"gopkg.in/yaml.v3"
 	"pgcaliper/internal/alert"
 	"pgcaliper/internal/config"
 	"pgcaliper/internal/daemon"
@@ -150,7 +152,7 @@ func runScan(cfg *config.Config, format string, output string) error {
 
 	if len(snapshots) == 0 {
 		if format == "" {
-			fmt.Println(ui.Yellow("  ▲ No schemas or table groups matched the configured pattern."))
+			fmt.Println(ui.Yellow("  ▲ No schemas, workspaces, or table groups matched the configured pattern."))
 		}
 		return nil
 	}
@@ -295,6 +297,20 @@ func runUninstall(cfg *config.Config) error {
 	return nil
 }
 
+func isValidInterval(s string) bool {
+	if s == "" {
+		return false
+	}
+	if _, err := time.ParseDuration(s); err == nil {
+		return true
+	}
+	if s == "@hourly" || s == "@daily" || s == "@weekly" || s == "@midnight" {
+		return true
+	}
+	fields := strings.Fields(s)
+	return len(fields) == 5
+}
+
 func runInitInteractive() error {
 	reader := bufio.NewReader(os.Stdin)
 	ui.PrintBanner()
@@ -302,109 +318,338 @@ func runInitInteractive() error {
 	fmt.Println(ui.White("  Welcome to the pgcaliper setup wizard!"))
 	fmt.Println(ui.Gray("  This wizard configures storage limits, scan intervals, and measurement strategies.\n"))
 
-	ui.PrintStep(1, "PostgreSQL Connection URL", "Enter standard connection string (credentials, host, port, db name)")
+	var dbURL string
+	var pool *pgxpool.Pool
 	defaultURL := "postgres://postgres:password123@localhost:5432/erp_enterprise_db?sslmode=disable"
-	fmt.Printf("  URL [%s]:\n  %s ", ui.Gray(defaultURL), ui.Cyan(">"))
-	dbURL, _ := reader.ReadString('\n')
-	dbURL = strings.TrimSpace(dbURL)
-	if dbURL == "" {
-		dbURL = defaultURL
-	}
 
+	for {
+		ui.PrintStep(1, "PostgreSQL Connection URL", "Enter standard connection string (credentials, host, port, db name)")
+		fmt.Printf("  URL [%s]:\n  %s ", ui.Gray(defaultURL), ui.Cyan(">"))
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		if input == "" {
+			dbURL = defaultURL
+			fmt.Printf("  %s %s\n", ui.Gray("› Selected default:"), ui.Cyan(defaultURL))
+		} else {
+			dbURL = input
+		}
+
+		testSpinner := ui.StartSpinner("Validating database connection...")
+		testCfg := &config.Config{
+			Database: config.DatabaseConfig{URL: dbURL, SafeModeReadReplica: true, StatementTimeout: "5s"},
+		}
+		testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		p, err := createPool(testCtx, testCfg)
+		if err != nil {
+			testCancel()
+			testSpinner.Stop(fmt.Sprintf("Connection format invalid: %v", err), false)
+			fmt.Println(ui.Red("  ✖ Please re-enter a valid PostgreSQL connection URL.\n"))
+			continue
+		}
+
+		if pingErr := p.Ping(testCtx); pingErr != nil {
+			testCancel()
+			p.Close()
+			testSpinner.Stop(fmt.Sprintf("Connection failed: %v", pingErr), false)
+			fmt.Println(ui.Red("  ✖ Database is unreachable with provided credentials. Please try again.\n"))
+			continue
+		}
+		testCancel()
+		testSpinner.Stop("PostgreSQL connection verified successfully!", true)
+		pool = p
+		break
+	}
+	defer pool.Close()
+
+	ins := inspector.New(pool, &config.Config{})
+
+	fmt.Println()
 	ui.PrintStep(2, "Measurement Strategy", "How is your database data organized?")
-	fmt.Println("    " + ui.Cyan("[1]") + " " + ui.White("Multi-Tenant Schemas") + " " + ui.Gray("(tenant_*, org_*, company_*) - [Recommended]"))
+	fmt.Println("    " + ui.Cyan("[1]") + " " + ui.White("Multi-Tenant Schemas") + " " + ui.Gray("(tenant_*, org_*, company_*) - [Recommended for Schema-per-Tenant]"))
 	fmt.Println("    " + ui.Cyan("[2]") + " " + ui.White("Database Fleet") + " " + ui.Gray("(One distinct database per customer)"))
 	fmt.Println("    " + ui.Cyan("[3]") + " " + ui.White("Custom Table Groups") + " " + ui.Gray("(Group tables by feature/domain: audit vs finance)"))
-	fmt.Printf("  Choice [%s]:\n  %s ", ui.Gray("1"), ui.Cyan(">"))
-	stratChoice, _ := reader.ReadString('\n')
-	stratChoice = strings.TrimSpace(stratChoice)
+	fmt.Println("    " + ui.Cyan("[4]") + " " + ui.White("Row-Level / Workspace Column") + " " + ui.Gray("(Single shared schema partitioned by workspace_id/tenant_id)"))
+
+	var stratChoice string
+	for {
+		fmt.Printf("  Choice [%s]:\n  %s ", ui.Gray("1"), ui.Cyan(">"))
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		if input == "" {
+			stratChoice = "1"
+			fmt.Printf("  %s %s\n", ui.Gray("› Selected default:"), ui.Cyan("[1] Multi-Tenant Schemas"))
+			break
+		}
+		if input == "1" || input == "2" || input == "3" || input == "4" {
+			stratChoice = input
+			break
+		}
+		fmt.Println(ui.Red("  ✖ Invalid choice. Please enter 1, 2, 3, or 4."))
+	}
 
 	mode := "schema"
-	schemaPattern := "tenant_.*|org_.*"
+	schemaPattern := ""
+	tenantCol := ""
+	var targetTables []string
+	var customGroups []config.CustomGroup
 
-	if stratChoice == "2" {
+	switch stratChoice {
+	case "2":
 		mode = "database"
-		schemaPattern = ""
-	} else if stratChoice == "3" {
+		fmt.Println(ui.Green("  ✓ Database Fleet mode selected."))
+
+	case "3":
 		mode = "custom_group"
-		schemaPattern = ""
-	} else {
-		fmt.Printf("\n  Enter Schema Regex Pattern [%s]:\n  %s ", ui.Gray("tenant_.*|org_.*"), ui.Cyan(">"))
-		patternInput, _ := reader.ReadString('\n')
-		patternInput = strings.TrimSpace(patternInput)
-		if patternInput != "" {
+		for groupNum := 1; ; groupNum++ {
+			fmt.Printf("\n  %s %s #%d:\n", ui.Cyan("›"), ui.White("Configure Group"), groupNum)
+
+			var grpName string
+			for {
+				fmt.Printf("    • Group Name (e.g. accounting, logs):\n    %s ", ui.Cyan(">"))
+				nameInput, _ := reader.ReadString('\n')
+				grpName = strings.TrimSpace(nameInput)
+				if grpName == "" {
+					grpName = fmt.Sprintf("group_%d", groupNum)
+					fmt.Printf("    %s %s\n", ui.Gray("› Selected default name:"), ui.Cyan(grpName))
+					break
+				}
+				break
+			}
+
+			var validTables []string
+			for {
+				fmt.Printf("    • Enter table names (comma-separated, e.g. invoices, vouchers):\n    %s ", ui.Cyan(">"))
+				tablesInput, _ := reader.ReadString('\n')
+				tablesInput = strings.TrimSpace(tablesInput)
+
+				if tablesInput == "" {
+					fmt.Println(ui.Red("    ✖ At least one table name is required for a group."))
+					continue
+				}
+
+				rawList := strings.Split(tablesInput, ",")
+				for _, t := range rawList {
+					tbl := strings.TrimSpace(t)
+					if tbl != "" {
+						validTables = append(validTables, tbl)
+					}
+				}
+
+				if len(validTables) > 0 {
+					break
+				}
+				fmt.Println(ui.Red("    ✖ No valid table names entered."))
+			}
+
+			customGroups = append(customGroups, config.CustomGroup{
+				Name:   grpName,
+				Tables: validTables,
+			})
+			fmt.Printf("    %s Added group '%s' with %d tables.\n", ui.Green("✓"), grpName, len(validTables))
+
+			fmt.Printf("\n  Do you want to add another table group? (y/N):\n  %s ", ui.Cyan(">"))
+			moreInput, _ := reader.ReadString('\n')
+			moreInput = strings.TrimSpace(strings.ToLower(moreInput))
+			if moreInput != "y" && moreInput != "yes" {
+				break
+			}
+		}
+
+	case "4":
+		mode = "row_level"
+		defaultCol := "workspace_id"
+		for {
+			fmt.Printf("\n  • Enter Tenant Column Name [%s]:\n  %s ", ui.Gray(defaultCol), ui.Cyan(">"))
+			colInput, _ := reader.ReadString('\n')
+			colInput = strings.TrimSpace(colInput)
+			if colInput == "" {
+				tenantCol = defaultCol
+				fmt.Printf("  %s %s\n", ui.Gray("› Selected default:"), ui.Cyan(defaultCol))
+				break
+			} else {
+				tenantCol = colInput
+				break
+			}
+		}
+
+		for {
+			fmt.Printf("  • Auto-discover all tables containing '%s'? (Y/n):\n  %s ", tenantCol, ui.Cyan(">"))
+			autoChoice, _ := reader.ReadString('\n')
+			autoChoice = strings.TrimSpace(strings.ToLower(autoChoice))
+			if autoChoice == "" {
+				autoChoice = "y"
+				fmt.Println(ui.Gray("  › Selected default: Auto-discover (Y)"))
+			}
+
+			if autoChoice == "n" || autoChoice == "no" {
+				for {
+					fmt.Printf("\n  • Enter table names manually (comma-separated, e.g. invoices, vouchers):\n  %s ", ui.Cyan(">"))
+					manualTables, _ := reader.ReadString('\n')
+					manualTables = strings.TrimSpace(manualTables)
+
+					if manualTables == "" {
+						fmt.Println(ui.Red("  ✖ Please enter at least one table name."))
+						continue
+					}
+
+					var verified []string
+					testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					for _, t := range strings.Split(manualTables, ",") {
+						tbl := strings.TrimSpace(t)
+						if tbl == "" {
+							continue
+						}
+
+						hasCol, _ := ins.ValidateTableHasColumn(testCtx, tbl, tenantCol)
+						if hasCol {
+							verified = append(verified, tbl)
+							fmt.Printf("    %s Table '%s' verified with column '%s'\n", ui.Green("✓"), tbl, tenantCol)
+						} else {
+							fmt.Printf("    %s Table '%s' does not contain column '%s' (skipped)\n", ui.Yellow("▲"), tbl, tenantCol)
+						}
+					}
+					testCancel()
+
+					if len(verified) == 0 {
+						fmt.Println(ui.Red(fmt.Sprintf("  ✖ None of the entered tables contain column '%s'. Please re-enter.", tenantCol)))
+						continue
+					}
+					targetTables = verified
+					break
+				}
+				break
+			} else if autoChoice == "y" || autoChoice == "yes" {
+				discSpinner := ui.StartSpinner(fmt.Sprintf("Scanning database for tables with '%s'...", tenantCol))
+				testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				foundTables, err := ins.FindTablesWithColumn(testCtx, tenantCol)
+				testCancel()
+
+				if err != nil || len(foundTables) == 0 {
+					discSpinner.Stop(fmt.Sprintf("No tables found containing column '%s'", tenantCol), false)
+					fmt.Printf("  %s Would you like to enter table names manually? (Y/n):\n  %s ", ui.Yellow("▲"), ui.Cyan(">"))
+					retryInput, _ := reader.ReadString('\n')
+					if strings.TrimSpace(strings.ToLower(retryInput)) == "n" {
+						return fmt.Errorf("configuration aborted: no tables with tenant column '%s'", tenantCol)
+					}
+					continue
+				} else {
+					discSpinner.Stop(fmt.Sprintf("Discovered %d tables containing '%s':", len(foundTables), tenantCol), true)
+					targetTables = foundTables
+					for _, ft := range foundTables {
+						fmt.Printf("    • %s\n", ui.Cyan(ft))
+					}
+					break
+				}
+			} else {
+				fmt.Println(ui.Red("  ✖ Please enter 'y' for auto-discovery or 'n' for manual entry."))
+			}
+		}
+
+	default:
+		mode = "schema"
+		defaultPat := "tenant_.*|org_.*"
+		for {
+			fmt.Printf("\n  Enter Schema Regex Pattern [%s]:\n  %s ", ui.Gray(defaultPat), ui.Cyan(">"))
+			patternInput, _ := reader.ReadString('\n')
+			patternInput = strings.TrimSpace(patternInput)
+			if patternInput == "" {
+				schemaPattern = defaultPat
+				fmt.Printf("  %s %s\n", ui.Gray("› Selected default:"), ui.Cyan(defaultPat))
+				break
+			}
+			if _, err := regexp.Compile(patternInput); err != nil {
+				fmt.Println(ui.Red(fmt.Sprintf("  ✖ Invalid regular expression pattern: %v. Please try again.", err)))
+				continue
+			}
 			schemaPattern = patternInput
+			break
 		}
-	}
-
-	ui.PrintStep(3, "Storage Quota Cap", "Set default limit in Gigabytes (GB) per tenant")
-	fmt.Printf("  Limit in GB [%s]:\n  %s ", ui.Gray("15.0"), ui.Cyan(">"))
-	quotaStr, _ := reader.ReadString('\n')
-	quotaStr = strings.TrimSpace(quotaStr)
-	quotaGB := 15.0
-	if quotaStr != "" {
-		if q, err := strconv.ParseFloat(quotaStr, 64); err == nil && q > 0 {
-			quotaGB = q
-		}
-	}
-	quotaBytes := int64(quotaGB * 1024 * 1024 * 1024)
-
-	ui.PrintStep(4, "Scan Frequency", "How often should background calibration execute? (e.g., 15m, 1h, 24h)")
-	fmt.Printf("  Interval [%s]:\n  %s ", ui.Gray("15m"), ui.Cyan(">"))
-	intervalStr, _ := reader.ReadString('\n')
-	intervalStr = strings.TrimSpace(intervalStr)
-	if intervalStr == "" {
-		intervalStr = "15m"
 	}
 
 	fmt.Println()
-	testSpinner := ui.StartSpinner("Validating database connection...")
-	testCfg := &config.Config{
-		Database: config.DatabaseConfig{URL: dbURL, SafeModeReadReplica: true, StatementTimeout: "5s"},
-	}
-	testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer testCancel()
+	ui.PrintStep(3, "Storage Quota Cap", "Set default limit in Gigabytes (GB) per tenant / group")
+	defaultQuotaGB := 15.0
+	var quotaBytes int64
 
-	pool, err := createPool(testCtx, testCfg)
-	if err != nil {
-		testSpinner.Stop(fmt.Sprintf("Connection failed: %v", err), false)
-	} else {
-		if pingErr := pool.Ping(testCtx); pingErr != nil {
-			testSpinner.Stop(fmt.Sprintf("Database ping failed: %v", pingErr), false)
-		} else {
-			testSpinner.Stop("PostgreSQL connection verified successfully!", true)
+	for {
+		fmt.Printf("  Limit in GB [%s]:\n  %s ", ui.Gray("15.0"), ui.Cyan(">"))
+		quotaStr, _ := reader.ReadString('\n')
+		quotaStr = strings.TrimSpace(quotaStr)
+		if quotaStr == "" {
+			quotaBytes = int64(defaultQuotaGB * 1024 * 1024 * 1024)
+			fmt.Printf("  %s %s\n", ui.Gray("› Selected default:"), ui.Cyan("15.0 GB"))
+			break
 		}
-		pool.Close()
+
+		q, err := strconv.ParseFloat(quotaStr, 64)
+		if err != nil || q <= 0 {
+			fmt.Println(ui.Red("  ✖ Invalid number. Please enter a positive number in GB (e.g. 15 or 50)."))
+			continue
+		}
+		quotaBytes = int64(q * 1024 * 1024 * 1024)
+		break
 	}
 
-	yamlContent := fmt.Sprintf(`version: "1"
+	fmt.Println()
+	ui.PrintStep(4, "Scan Frequency", "How often should background calibration execute? (e.g., 15m, 1h, 24h, @daily)")
+	defaultInterval := "15m"
+	var intervalStr string
 
-database:
-  url: "%s"
-  safe_mode_read_replica: true
-  statement_timeout: "10s"
+	for {
+		fmt.Printf("  Interval [%s]:\n  %s ", ui.Gray(defaultInterval), ui.Cyan(">"))
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		if input == "" {
+			intervalStr = defaultInterval
+			fmt.Printf("  %s %s\n", ui.Gray("› Selected default:"), ui.Cyan(defaultInterval))
+			break
+		}
 
-schedule:
-  interval: "%s"
-  retention_days: 90
+		if !isValidInterval(input) {
+			fmt.Println(ui.Red("  ✖ Invalid interval. Valid examples: 15m, 1h, 24h, @daily, '0 * * * *'"))
+			continue
+		}
+		intervalStr = input
+		break
+	}
 
-storage:
-  schema: "_pgcaliper"
+	cfgOut := config.Config{
+		Version: "1",
+		Database: config.DatabaseConfig{
+			URL:                 dbURL,
+			SafeModeReadReplica: true,
+			StatementTimeout:    "10s",
+		},
+		Schedule: config.ScheduleConfig{
+			Interval:      intervalStr,
+			RetentionDays: 90,
+		},
+		Storage: config.StorageConfig{
+			Schema: "_pgcaliper",
+		},
+		Strategy: config.StrategyConfig{
+			Mode:              mode,
+			SchemaPattern:     schemaPattern,
+			TenantColumn:      tenantCol,
+			Tables:            targetTables,
+			DefaultQuotaBytes: quotaBytes,
+			Groups:            customGroups,
+		},
+		Alerts: alert.WebhookConfig{
+			Enabled:  false,
+			URL:      "https://hooks.slack.com/services/YOUR/WEBHOOK/URL",
+			Format:   "slack",
+			OnEvents: []string{"WARN_80", "CRITICAL_95", "EXCEEDED"},
+		},
+		Engine: config.EngineConfig{
+			Concurrency: 4,
+		},
+	}
 
-strategy:
-  mode: "%s"
-  schema_pattern: "%s"
-  default_quota_bytes: %d # %.2f GB
-
-alerts:
-  enabled: false
-  url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
-  format: "slack"
-  on_events: ["WARN_80", "CRITICAL_95", "EXCEEDED"]
-
-engine:
-  concurrency: 4
-`, dbURL, intervalStr, mode, schemaPattern, quotaBytes, quotaGB)
+	yamlBytes, err := yaml.Marshal(&cfgOut)
+	if err != nil {
+		return fmt.Errorf("failed serializing config: %w", err)
+	}
 
 	targetFile := "pgcaliper.yaml"
 	if os.Geteuid() == 0 {
@@ -414,9 +659,9 @@ engine:
 		}
 	}
 
-	if err := os.WriteFile(targetFile, []byte(yamlContent), 0600); err != nil {
+	if err := os.WriteFile(targetFile, yamlBytes, 0600); err != nil {
 		targetFile = "pgcaliper.yaml"
-		if err := os.WriteFile(targetFile, []byte(yamlContent), 0600); err != nil {
+		if err := os.WriteFile(targetFile, yamlBytes, 0600); err != nil {
 			return fmt.Errorf("failed writing configuration file: %w", err)
 		}
 	}

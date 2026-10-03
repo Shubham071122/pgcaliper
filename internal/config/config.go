@@ -43,7 +43,9 @@ type CustomGroup struct {
 
 type StrategyConfig struct {
 	Mode              string        `yaml:"mode"`
-	SchemaPattern     string        `yaml:"schema_pattern"`
+	SchemaPattern     string        `yaml:"schema_pattern,omitempty"`
+	TenantColumn      string        `yaml:"tenant_column,omitempty"`
+	Tables            []string      `yaml:"tables,omitempty"`
 	DefaultQuotaBytes int64         `yaml:"default_quota_bytes"`
 	Groups            []CustomGroup `yaml:"groups,omitempty"`
 }
@@ -126,6 +128,9 @@ func LoadConfig(filePath string) (*Config, error) {
 	}
 	if cfg.Strategy.Mode == "" {
 		cfg.Strategy.Mode = "schema"
+	}
+	if cfg.Strategy.TenantColumn == "" {
+		cfg.Strategy.TenantColumn = "workspace_id"
 	}
 	if cfg.Strategy.DefaultQuotaBytes <= 0 {
 		cfg.Strategy.DefaultQuotaBytes = 15 * 1024 * 1024 * 1024

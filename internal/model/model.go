@@ -17,6 +17,7 @@ const (
 	GroupTypeSchema   GroupType = "SCHEMA"
 	GroupTypeDatabase GroupType = "DATABASE"
 	GroupTypeCustom   GroupType = "CUSTOM_GROUP"
+	GroupTypeRowLevel GroupType = "ROW_LEVEL"
 )
 
 type TableMetrics struct {

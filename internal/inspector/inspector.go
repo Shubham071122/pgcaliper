@@ -124,14 +124,7 @@ func (ins *Inspector) InspectSchema(ctx context.Context, schemaName string, quot
 		usagePct = (float64(sumTotal) / float64(quotaBytes)) * 100.0
 	}
 
-	status := model.StatusActive
-	if usagePct >= 100.0 {
-		status = model.StatusLimitExceeded
-	} else if usagePct >= 95.0 {
-		status = model.StatusWarning95
-	} else if usagePct >= 80.0 {
-		status = model.StatusWarning80
-	}
+	status := calculateStatus(usagePct)
 
 	return &model.GroupSnapshot{
 		GroupID:         schemaName,
@@ -148,123 +141,197 @@ func (ins *Inspector) InspectSchema(ctx context.Context, schemaName string, quot
 	}, nil
 }
 
-func (ins *Inspector) InspectDatabaseFleet(ctx context.Context, quotaBytes int64) ([]*model.GroupSnapshot, error) {
-	query := `
-		SELECT 
-			datname,
-			pg_database_size(datname) AS total_bytes
-		FROM pg_stat_database
-		WHERE datname NOT IN ('postgres', 'template0', 'template1')
-		ORDER BY total_bytes DESC;
-	`
-	rows, err := ins.pool.Query(ctx, query)
+func (ins *Inspector) InspectDatabase(ctx context.Context, dbName string, quotaBytes int64) (*model.GroupSnapshot, error) {
+	var totalBytes int64
+	err := ins.pool.QueryRow(ctx, `SELECT pg_database_size($1)`, dbName).Scan(&totalBytes)
 	if err != nil {
-		return nil, fmt.Errorf("failed to inspect database fleet: %w", err)
+		return nil, fmt.Errorf("failed measuring database %s size: %w", dbName, err)
+	}
+
+	usagePct := 0.0
+	if quotaBytes > 0 {
+		usagePct = (float64(totalBytes) / float64(quotaBytes)) * 100.0
+	}
+
+	return &model.GroupSnapshot{
+		GroupID:         dbName,
+		GroupType:       model.GroupTypeDatabase,
+		HeapBytes:       totalBytes,
+		IndexBytes:      0,
+		TotalBytes:      totalBytes,
+		QuotaBytes:      quotaBytes,
+		UsagePercentage: usagePct,
+		Status:          calculateStatus(usagePct),
+		TablesCount:     0,
+		CapturedAt:      time.Now(),
+	}, nil
+}
+
+func (ins *Inspector) InspectCustomGroup(ctx context.Context, group config.CustomGroup, quotaBytes int64) (*model.GroupSnapshot, error) {
+	var tables []model.TableMetrics
+	var sumData, sumIndex, sumTotal int64
+
+	for _, tbl := range group.Tables {
+		query := `
+			SELECT 
+				pg_table_size(quote_ident($1)) AS data_bytes,
+				pg_indexes_size(quote_ident($1)) AS index_bytes,
+				pg_total_relation_size(quote_ident($1)) AS total_bytes,
+				pg_size_pretty(pg_table_size(quote_ident($1))) AS human_data,
+				pg_size_pretty(pg_indexes_size(quote_ident($1))) AS human_index,
+				pg_size_pretty(pg_total_relation_size(quote_ident($1))) AS human_total
+		`
+		var tm model.TableMetrics
+		tm.SchemaName = "public"
+		tm.TableName = tbl
+		err := ins.pool.QueryRow(ctx, query, tbl).Scan(
+			&tm.DataBytes,
+			&tm.IndexBytes,
+			&tm.TotalBytes,
+			&tm.HumanDataSize,
+			&tm.HumanIdxSize,
+			&tm.HumanTotal,
+		)
+		if err != nil {
+			continue
+		}
+
+		sumData += tm.DataBytes
+		sumIndex += tm.IndexBytes
+		sumTotal += tm.TotalBytes
+		tables = append(tables, tm)
+	}
+
+	usagePct := 0.0
+	if quotaBytes > 0 {
+		usagePct = (float64(sumTotal) / float64(quotaBytes)) * 100.0
+	}
+
+	return &model.GroupSnapshot{
+		GroupID:         group.Name,
+		GroupType:       model.GroupTypeCustom,
+		HeapBytes:       sumData,
+		IndexBytes:      sumIndex,
+		TotalBytes:      sumTotal,
+		QuotaBytes:      quotaBytes,
+		UsagePercentage: usagePct,
+		Status:          calculateStatus(usagePct),
+		TablesCount:     len(tables),
+		Tables:          tables,
+		CapturedAt:      time.Now(),
+	}, nil
+}
+
+func (ins *Inspector) FindTablesWithColumn(ctx context.Context, columnName string) ([]string, error) {
+	query := `
+		SELECT table_name 
+		FROM information_schema.columns 
+		WHERE column_name = $1 
+		  AND table_schema = 'public' 
+		  AND table_name NOT IN (SELECT table_name FROM information_schema.views WHERE table_schema = 'public')
+		ORDER BY table_name;
+	`
+	rows, err := ins.pool.Query(ctx, query, columnName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover tables with column '%s': %w", columnName, err)
 	}
 	defer rows.Close()
 
-	var snapshots []*model.GroupSnapshot
+	var tables []string
 	for rows.Next() {
-		var dbName string
-		var totalBytes int64
-		if err := rows.Scan(&dbName, &totalBytes); err != nil {
-			return nil, err
+		var t string
+		if err := rows.Scan(&t); err == nil {
+			tables = append(tables, t)
+		}
+	}
+	return tables, nil
+}
+
+func (ins *Inspector) ValidateTableHasColumn(ctx context.Context, tableName string, columnName string) (bool, error) {
+	var count int
+	query := `
+		SELECT COUNT(*) 
+		FROM information_schema.columns 
+		WHERE table_name = $1 AND column_name = $2 AND table_schema = 'public'
+	`
+	err := ins.pool.QueryRow(ctx, query, tableName, columnName).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (ins *Inspector) InspectRowLevelTenants(ctx context.Context, tenantColumn string, targetTables []string, quotaBytes int64) ([]*model.GroupSnapshot, error) {
+	type TenantAggregate struct {
+		HeapBytes  int64
+		IndexBytes int64
+		TablesSeen int
+	}
+
+	tenantMap := make(map[string]*TenantAggregate)
+	var mu sync.Mutex
+
+	for _, tbl := range targetTables {
+		var totalTableHeap, totalTableIndex int64
+		sizeQuery := fmt.Sprintf(`SELECT pg_table_size('%s'), pg_indexes_size('%s')`, tbl, tbl)
+		_ = ins.pool.QueryRow(ctx, sizeQuery).Scan(&totalTableHeap, &totalTableIndex)
+
+		query := fmt.Sprintf(`
+			SELECT 
+				CAST(%s AS TEXT) AS tenant_id,
+				SUM(pg_column_size(t.*)) AS tenant_heap
+			FROM %s t
+			WHERE %s IS NOT NULL
+			GROUP BY %s;
+		`, tenantColumn, tbl, tenantColumn, tenantColumn)
+
+		rows, err := ins.pool.Query(ctx, query)
+		if err != nil {
+			continue
 		}
 
+		for rows.Next() {
+			var tenantID string
+			var tenantHeap int64
+			if err := rows.Scan(&tenantID, &tenantHeap); err != nil {
+				continue
+			}
+
+			propIndex := int64(0)
+			if totalTableHeap > 0 && totalTableIndex > 0 {
+				propIndex = int64(float64(totalTableIndex) * (float64(tenantHeap) / float64(totalTableHeap)))
+			}
+
+			mu.Lock()
+			if _, exists := tenantMap[tenantID]; !exists {
+				tenantMap[tenantID] = &TenantAggregate{}
+			}
+			tenantMap[tenantID].HeapBytes += tenantHeap
+			tenantMap[tenantID].IndexBytes += propIndex
+			tenantMap[tenantID].TablesSeen++
+			mu.Unlock()
+		}
+		rows.Close()
+	}
+
+	var snapshots []*model.GroupSnapshot
+	for tenantID, agg := range tenantMap {
+		totalBytes := agg.HeapBytes + agg.IndexBytes
 		usagePct := 0.0
 		if quotaBytes > 0 {
 			usagePct = (float64(totalBytes) / float64(quotaBytes)) * 100.0
 		}
 
-		status := model.StatusActive
-		if usagePct >= 100.0 {
-			status = model.StatusLimitExceeded
-		} else if usagePct >= 95.0 {
-			status = model.StatusWarning95
-		} else if usagePct >= 80.0 {
-			status = model.StatusWarning80
-		}
-
 		snapshots = append(snapshots, &model.GroupSnapshot{
-			GroupID:         dbName,
-			GroupType:       model.GroupTypeDatabase,
-			HeapBytes:       totalBytes,
-			IndexBytes:      0,
+			GroupID:         tenantID,
+			GroupType:       model.GroupTypeRowLevel,
+			HeapBytes:       agg.HeapBytes,
+			IndexBytes:      agg.IndexBytes,
 			TotalBytes:      totalBytes,
 			QuotaBytes:      quotaBytes,
 			UsagePercentage: usagePct,
-			Status:          status,
-			TablesCount:     0,
-			CapturedAt:      time.Now(),
-		})
-	}
-
-	return snapshots, nil
-}
-
-func (ins *Inspector) InspectCustomGroups(ctx context.Context, quotaBytes int64) ([]*model.GroupSnapshot, error) {
-	var snapshots []*model.GroupSnapshot
-
-	for _, g := range ins.cfg.Strategy.Groups {
-		var sumData, sumIndex, sumTotal int64
-		var tables []model.TableMetrics
-
-		for _, tblPattern := range g.Tables {
-			query := `
-				SELECT 
-					table_schema,
-					table_name,
-					pg_table_size(quote_ident(table_schema) || '.' || quote_ident(table_name)) AS data_bytes,
-					pg_indexes_size(quote_ident(table_schema) || '.' || quote_ident(table_name)) AS index_bytes,
-					pg_total_relation_size(quote_ident(table_schema) || '.' || quote_ident(table_name)) AS total_bytes
-				FROM information_schema.tables
-				WHERE table_type = 'BASE TABLE'
-				  AND table_schema NOT IN ('pg_catalog', 'information_schema', '_pgcaliper')
-				  AND table_name LIKE $1;
-			`
-			likePattern := regexp.MustCompile(`\*`).ReplaceAllString(tblPattern, "%")
-			rows, err := ins.pool.Query(ctx, query, likePattern)
-			if err != nil {
-				continue
-			}
-
-			for rows.Next() {
-				var tm model.TableMetrics
-				if err := rows.Scan(&tm.SchemaName, &tm.TableName, &tm.DataBytes, &tm.IndexBytes, &tm.TotalBytes); err == nil {
-					sumData += tm.DataBytes
-					sumIndex += tm.IndexBytes
-					sumTotal += tm.TotalBytes
-					tables = append(tables, tm)
-				}
-			}
-			rows.Close()
-		}
-
-		usagePct := 0.0
-		if quotaBytes > 0 {
-			usagePct = (float64(sumTotal) / float64(quotaBytes)) * 100.0
-		}
-
-		status := model.StatusActive
-		if usagePct >= 100.0 {
-			status = model.StatusLimitExceeded
-		} else if usagePct >= 95.0 {
-			status = model.StatusWarning95
-		} else if usagePct >= 80.0 {
-			status = model.StatusWarning80
-		}
-
-		snapshots = append(snapshots, &model.GroupSnapshot{
-			GroupID:         g.Name,
-			GroupType:       model.GroupTypeCustom,
-			HeapBytes:       sumData,
-			IndexBytes:      sumIndex,
-			TotalBytes:      sumTotal,
-			QuotaBytes:      quotaBytes,
-			UsagePercentage: usagePct,
-			Status:          status,
-			TablesCount:     len(tables),
-			Tables:          tables,
+			Status:          calculateStatus(usagePct),
+			TablesCount:     agg.TablesSeen,
 			CapturedAt:      time.Now(),
 		})
 	}
@@ -273,59 +340,90 @@ func (ins *Inspector) InspectCustomGroups(ctx context.Context, quotaBytes int64)
 }
 
 func (ins *Inspector) RunInspection(ctx context.Context) ([]*model.GroupSnapshot, error) {
-	switch ins.cfg.Strategy.Mode {
+	mode := ins.cfg.Strategy.Mode
+	quota := ins.cfg.Strategy.DefaultQuotaBytes
+
+	switch mode {
 	case "database":
-		return ins.InspectDatabaseFleet(ctx, ins.cfg.Strategy.DefaultQuotaBytes)
+		var dbName string
+		_ = ins.pool.QueryRow(ctx, `SELECT current_database()`).Scan(&dbName)
+		snap, err := ins.InspectDatabase(ctx, dbName, quota)
+		if err != nil {
+			return nil, err
+		}
+		return []*model.GroupSnapshot{snap}, nil
+
 	case "custom_group":
-		return ins.InspectCustomGroups(ctx, ins.cfg.Strategy.DefaultQuotaBytes)
+		var snapshots []*model.GroupSnapshot
+		for _, grp := range ins.cfg.Strategy.Groups {
+			snap, err := ins.InspectCustomGroup(ctx, grp, quota)
+			if err != nil {
+				continue
+			}
+			snapshots = append(snapshots, snap)
+		}
+		return snapshots, nil
+
+	case "row_level":
+		targetTables := ins.cfg.Strategy.Tables
+		if len(targetTables) == 0 {
+			var err error
+			targetTables, err = ins.FindTablesWithColumn(ctx, ins.cfg.Strategy.TenantColumn)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return ins.InspectRowLevelTenants(ctx, ins.cfg.Strategy.TenantColumn, targetTables, quota)
+
+	case "schema":
+		fallthrough
 	default:
 		schemas, err := ins.ListTargetSchemas(ctx, ins.cfg.Strategy.SchemaPattern)
 		if err != nil {
 			return nil, err
 		}
 
-		if len(schemas) == 0 {
-			return nil, nil
+		concurrency := ins.cfg.Engine.Concurrency
+		if concurrency <= 0 {
+			concurrency = 4
 		}
 
-		maxWorkers := ins.cfg.Engine.Concurrency
-		if maxWorkers <= 0 {
-			maxWorkers = 4
+		schemaChan := make(chan string, len(schemas))
+		for _, s := range schemas {
+			schemaChan <- s
 		}
+		close(schemaChan)
 
-		results := make([]*model.GroupSnapshot, len(schemas))
-		jobs := make(chan int, len(schemas))
 		var wg sync.WaitGroup
+		var mu sync.Mutex
+		var snapshots []*model.GroupSnapshot
 
-		for w := 0; w < maxWorkers; w++ {
+		for i := 0; i < concurrency; i++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				for idx := range jobs {
-					schemaName := schemas[idx]
-					snapshot, err := ins.InspectSchema(ctx, schemaName, ins.cfg.Strategy.DefaultQuotaBytes)
-					if err != nil {
-						fmt.Printf("▲ Error inspecting schema %s: %v\n", schemaName, err)
-						continue
+				for s := range schemaChan {
+					snap, err := ins.InspectSchema(ctx, s, quota)
+					if err == nil && snap != nil {
+						mu.Lock()
+						snapshots = append(snapshots, snap)
+						mu.Unlock()
 					}
-					results[idx] = snapshot
 				}
 			}()
 		}
-
-		for i := range schemas {
-			jobs <- i
-		}
-		close(jobs)
 		wg.Wait()
-
-		var validSnapshots []*model.GroupSnapshot
-		for _, r := range results {
-			if r != nil {
-				validSnapshots = append(validSnapshots, r)
-			}
-		}
-
-		return validSnapshots, nil
+		return snapshots, nil
 	}
+}
+
+func calculateStatus(usagePct float64) model.QuotaStatus {
+	if usagePct >= 100.0 {
+		return model.StatusLimitExceeded
+	} else if usagePct >= 95.0 {
+		return model.StatusWarning95
+	} else if usagePct >= 80.0 {
+		return model.StatusWarning80
+	}
+	return model.StatusActive
 }
