@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -686,7 +687,7 @@ func main() {
 
 	for _, arg := range os.Args[1:] {
 		if arg == "-v" || arg == "--version" || arg == "version" {
-			fmt.Printf("pgcaliper version %s (darwin/arm64)\n", Version)
+			fmt.Printf("pgcaliper version %s (%s/%s)\n", Version, runtime.GOOS, runtime.GOARCH)
 			return
 		}
 		if (arg == "-h" || arg == "--help") && command == "" {
