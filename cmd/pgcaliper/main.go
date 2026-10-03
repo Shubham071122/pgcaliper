@@ -327,26 +327,57 @@ func runCompleteUninstall(configPath string) error {
 	fmt.Print(ui.White("  2. Remove configuration files (/etc/pgcaliper, pgcaliper.yaml)? (Y/n): "))
 	cfgInput, _ := reader.ReadString('\n')
 	if strings.TrimSpace(strings.ToLower(cfgInput)) != "n" {
-		_ = os.Remove("pgcaliper.yaml")
-		_ = os.RemoveAll("/etc/pgcaliper")
+		if err := os.Remove("pgcaliper.yaml"); err == nil {
+			fmt.Printf("  %s Removed local pgcaliper.yaml\n", ui.Green("✓"))
+		} else if !os.IsNotExist(err) {
+			fmt.Printf("  %s Failed to remove pgcaliper.yaml: %v\n", ui.Red("✗"), err)
+		}
+		if err := os.RemoveAll("/etc/pgcaliper"); err != nil && !os.IsNotExist(err) {
+			if os.IsPermission(err) {
+				fmt.Printf("  %s Failed to remove /etc/pgcaliper: Permission denied (run with sudo)\n", ui.Red("✗"))
+			} else {
+				fmt.Printf("  %s Failed to remove /etc/pgcaliper: %v\n", ui.Red("✗"), err)
+			}
+		} else if err == nil {
+			if _, statErr := os.Stat("/etc/pgcaliper"); os.IsNotExist(statErr) {
+				fmt.Printf("  %s Removed /etc/pgcaliper\n", ui.Green("✓"))
+			}
+		}
 		if home, err := os.UserHomeDir(); err == nil {
 			_ = os.RemoveAll(home + "/.config/pgcaliper")
 		}
-		fmt.Printf("  %s Removed configuration files\n", ui.Green("✓"))
 	}
 
 	fmt.Print(ui.White("  3. Remove pgcaliper executable binary (/usr/local/bin/pgcaliper)? (Y/n): "))
 	binInput, _ := reader.ReadString('\n')
 	if strings.TrimSpace(strings.ToLower(binInput)) != "n" {
 		execPath, err := os.Executable()
+		removed := false
+
 		if err == nil {
-			_ = os.Remove(execPath)
+			if remErr := os.Remove(execPath); remErr == nil {
+				removed = true
+			} else if os.IsPermission(remErr) {
+				fmt.Printf("  %s Failed to remove '%s': Permission denied.\n  %s Run: %s\n", ui.Red("✗"), execPath, ui.Cyan("›"), ui.Yellow("sudo pgcaliper uninstall"))
+			}
 		}
-		_ = os.Remove("/usr/local/bin/pgcaliper")
-		fmt.Printf("  %s Removed binary executable\n", ui.Green("✓"))
+
+		if remErr := os.Remove("/usr/local/bin/pgcaliper"); remErr == nil {
+			removed = true
+		} else if !os.IsNotExist(remErr) && !removed {
+			if os.IsPermission(remErr) {
+				fmt.Printf("  %s Failed to remove '/usr/local/bin/pgcaliper': Permission denied.\n  %s Run: %s\n", ui.Red("✗"), ui.Cyan("›"), ui.Yellow("sudo pgcaliper uninstall"))
+			} else {
+				fmt.Printf("  %s Failed to remove '/usr/local/bin/pgcaliper': %v\n", ui.Red("✗"), remErr)
+			}
+		}
+
+		if removed {
+			fmt.Printf("  %s Removed binary executable\n", ui.Green("✓"))
+		}
 	}
 
-	fmt.Printf("\n  %s pgcaliper has been completely uninstalled. Goodbye!\n\n", ui.Green("✓"))
+	fmt.Printf("\n  %s pgcaliper uninstall process completed.\n\n", ui.Green("✓"))
 	return nil
 }
 

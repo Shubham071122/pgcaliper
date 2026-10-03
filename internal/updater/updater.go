@@ -127,14 +127,18 @@ func Upgrade(currentVersion string) error {
 
 	// Replace the old binary
 	if err := os.Rename(tempPath, execPath); err != nil {
+		if os.IsPermission(err) {
+			dlSpinner.Stop("Permission denied", false)
+			return fmt.Errorf("permission denied writing to %s. Please run with 'sudo pgcaliper upgrade'", execPath)
+		}
 		// Fallback for cross-device link: copy over
 		input, errRead := os.ReadFile(tempPath)
 		if errRead != nil {
 			dlSpinner.Stop("Failed updating binary", false)
-			if os.IsPermission(err) {
-				return fmt.Errorf("permission denied writing to %s. Please run with 'sudo pgcaliper upgrade'", execPath)
+			if os.IsPermission(errRead) {
+				return fmt.Errorf("permission denied reading temporary binary %s", tempPath)
 			}
-			return err
+			return errRead
 		}
 		if errWrite := os.WriteFile(execPath, input, 0755); errWrite != nil {
 			dlSpinner.Stop("Failed updating binary", false)
@@ -144,7 +148,6 @@ func Upgrade(currentVersion string) error {
 			return errWrite
 		}
 	}
-
 	dlSpinner.Stop(fmt.Sprintf("Successfully upgraded pgcaliper to %s!", rel.TagName), true)
 	fmt.Printf("\n  %s Binary updated at %s\n", ui.Green("✓"), ui.Cyan(fmt.Sprintf("'%s'", execPath)))
 	fmt.Printf("  %s Run '%s' to verify.\n\n", ui.Cyan("›"), ui.Green("pgcaliper -v"))
