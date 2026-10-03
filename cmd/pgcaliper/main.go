@@ -26,7 +26,7 @@ import (
 	"pgcaliper/internal/ui"
 )
 
-const Version = "1.1.1"
+var Version = "dev"
 
 func createPool(ctx context.Context, cfg *config.Config) (*pgxpool.Pool, error) {
 	poolConfig, err := pgxpool.ParseConfig(cfg.Database.URL)
