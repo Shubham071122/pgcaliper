@@ -24,6 +24,7 @@ import (
 	"pgcaliper/internal/model"
 	"pgcaliper/internal/storage"
 	"pgcaliper/internal/ui"
+	"pgcaliper/internal/updater"
 )
 
 var Version = "dev"
@@ -738,7 +739,11 @@ func main() {
 
 	for _, arg := range os.Args[1:] {
 		if arg == "-v" || arg == "--version" || arg == "version" {
-			fmt.Printf("pgcaliper version %s (%s/%s)\n", Version, runtime.GOOS, runtime.GOARCH)
+			ver := Version
+			if !strings.HasPrefix(ver, "v") && ver != "dev" {
+				ver = "v" + ver
+			}
+			fmt.Printf("pgcaliper version %s (%s/%s)\n", ver, runtime.GOOS, runtime.GOARCH)
 			return
 		}
 		if (arg == "-h" || arg == "--help") && command == "" {
@@ -886,6 +891,11 @@ func main() {
 			os.Exit(1)
 		}
 		if err := runClearData(cfg); err != nil {
+			ui.PrintErrorWithHint(err)
+			os.Exit(1)
+		}
+	case "upgrade", "update":
+		if err := updater.Upgrade(Version); err != nil {
 			ui.PrintErrorWithHint(err)
 			os.Exit(1)
 		}
