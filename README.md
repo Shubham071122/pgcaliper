@@ -9,16 +9,18 @@
 ## Table of Contents
 1. [Overview](#overview)
 2. [Architecture](#architecture)
-3. [Installation](#installation)
-4. [Interactive Setup (`pgcaliper init`)](#interactive-setup-pgcaliper-init)
-5. [CLI Commands Reference](#cli-commands-reference)
-6. [Granular Table Breakdown (`pgcaliper details`)](#granular-table-breakdown-pgcaliper-details)
-7. [Running 24/7 as a Background Daemon (`pgcaliper daemon`)](#running-247-as-a-background-daemon-pgcaliper-daemon)
-8. [Measurement Strategies (`pgcaliper.yaml`)](#measurement-strategies-pgcaliperyaml)
-9. [Event Alerting & Webhooks](#event-alerting--webhooks)
-10. [Application Integration Recipes](#application-integration-recipes)
-11. [Uninstallation](#uninstallation)
-12. [License](#license)
+3. [Quick Start (3 Steps)](#quick-start-3-steps)
+4. [Installation Options](#installation-options)
+5. [Interactive Setup (`pgcaliper init`)](#interactive-setup-pgcaliper-init)
+6. [CLI Commands Reference](#cli-commands-reference)
+7. [Granular Table Breakdown (`pgcaliper details`)](#granular-table-breakdown-pgcaliper-details)
+8. [Running 24/7 as a Background Daemon (`pgcaliper daemon`)](#running-247-as-a-background-daemon-pgcaliper-daemon)
+9. [Measurement Strategies (`pgcaliper.yaml`)](#measurement-strategies-pgcaliperyaml)
+10. [Configuration Security & Best Practices](#configuration-security--best-practices)
+11. [Event Alerting & Webhooks](#event-alerting--webhooks)
+12. [Application Integration Recipes](#application-integration-recipes)
+13. [Uninstallation](#uninstallation)
+14. [License](#license)
 
 ---
 
@@ -72,11 +74,31 @@ In multi-tenant SaaS platforms, ERPs, and database clusters, managing storage qu
 
 ---
 
-## Installation
+## Quick Start (3 Steps)
+
+### 1. Install
+```bash
+curl -sSL https://raw.githubusercontent.com/Shubham071122/pgcaliper/master/install.sh | sudo bash
+```
+
+### 2. Configure (Interactive Wizard)
+```bash
+sudo pgcaliper init
+```
+*Validates your database connection live and automatically creates a secure configuration with `chmod 600` (Owner-only) permissions.*
+
+### 3. Scan & View Metrics
+```bash
+sudo pgcaliper scan
+```
+
+---
+
+## Installation Options
 
 ### Option 1: One-Line Installer (Linux / macOS)
 ```bash
-curl -sSL https://raw.githubusercontent.com/Shubham071122/pgcaliper/master/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/Shubham071122/pgcaliper/master/install.sh | sudo bash
 ```
 
 ### Option 2: Pre-compiled Binary Release
@@ -98,16 +120,6 @@ go install github.com/Shubham071122/pgcaliper/cmd/pgcaliper@latest
 git clone https://github.com/Shubham071122/pgcaliper.git
 cd pgcaliper
 go build -o bin/pgcaliper ./cmd/pgcaliper
-```
-
----
-
-## Interactive Setup (`pgcaliper init`)
-
-To generate a working configuration with live PostgreSQL connection testing:
-
-```bash
-pgcaliper init
 ```
 
 ---
@@ -153,7 +165,7 @@ customers                        792.00 KB       936.00 KB         1.69 MB      
 Supports standard durations (`15m`, `1h`, `24h`) and 5-part cron expressions (`0 * * * *`, `*/30 * * * *`):
 
 ```bash
-pgcaliper daemon --config=pgcaliper.yaml
+pgcaliper daemon
 ```
 
 ### Production `systemd` Service (`/etc/systemd/system/pgcaliper.service`):
@@ -166,7 +178,7 @@ After=network.target postgresql.service
 Type=simple
 User=postgres
 WorkingDirectory=/etc/pgcaliper
-ExecStart=/usr/local/bin/pgcaliper daemon --config=/etc/pgcaliper/pgcaliper.yaml
+ExecStart=/usr/local/bin/pgcaliper daemon
 Restart=always
 RestartSec=10
 
@@ -231,6 +243,21 @@ strategy:
 
 ---
 
+## Configuration Security & Best Practices
+
+1. **Automatic `0600` Permissions:** `pgcaliper init` automatically generates configuration files with `chmod 600` (Owner Read/Write Only) so other system users cannot view database credentials.
+2. **Multi-Path Config Discovery:** `pgcaliper` commands automatically discover configuration files across standard Linux paths:
+   - `./pgcaliper.yaml`
+   - `/etc/pgcaliper/pgcaliper.yaml`
+   - `~/.config/pgcaliper/pgcaliper.yaml`
+3. **Environment Variable Interpolation:** Passwords can be passed via environment variables without hardcoding secrets:
+   ```yaml
+   database:
+     url: "${DATABASE_URL}"
+   ```
+
+---
+
 ## Event Alerting & Webhooks
 
 Configure real-time notifications for threshold transitions:
@@ -271,7 +298,7 @@ LIMIT 1;
 To remove all `pgcaliper` metadata cleanly:
 
 ```bash
-pgcaliper uninstall --config=pgcaliper.yaml
+pgcaliper uninstall
 ```
 
 - Prompts for confirmation.

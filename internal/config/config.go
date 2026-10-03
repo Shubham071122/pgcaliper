@@ -86,9 +86,26 @@ func expandEnv(content []byte) []byte {
 }
 
 func LoadConfig(filePath string) (*Config, error) {
-	data, err := os.ReadFile(filePath)
+	targetPath := filePath
+	if targetPath == "pgcaliper.yaml" || targetPath == "" {
+		candidates := []string{
+			"pgcaliper.yaml",
+			"/etc/pgcaliper/pgcaliper.yaml",
+		}
+		if home, err := os.UserHomeDir(); err == nil {
+			candidates = append(candidates, home+"/.config/pgcaliper/pgcaliper.yaml")
+		}
+		for _, cand := range candidates {
+			if _, err := os.Stat(cand); err == nil {
+				targetPath = cand
+				break
+			}
+		}
+	}
+
+	data, err := os.ReadFile(targetPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read config file %s: %w", filePath, err)
+		return nil, fmt.Errorf("failed to read config file %s: %w", targetPath, err)
 	}
 
 	expandedData := expandEnv(data)

@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -71,7 +72,7 @@ func exportSnapshots(snapshots []*model.GroupSnapshot, format string, outputPath
 	}
 
 	if outputPath != "" {
-		if err := os.WriteFile(outputPath, data, 0644); err != nil {
+		if err := os.WriteFile(outputPath, data, 0600); err != nil {
 			return fmt.Errorf("failed writing export file %s: %w", outputPath, err)
 		}
 		fmt.Printf("%s Export written to %s\n", ui.Green("✓"), outputPath)
@@ -302,7 +303,7 @@ func runInitInteractive() error {
 	fmt.Println(ui.Gray("  This wizard configures storage limits, scan intervals, and measurement strategies.\n"))
 
 	ui.PrintStep(1, "PostgreSQL Connection URL", "Enter standard connection string (credentials, host, port, db name)")
-	defaultURL := "postgres://postgres:password123@localhost:5439/erp_enterprise_db?sslmode=disable"
+	defaultURL := "postgres://postgres:password123@localhost:5432/erp_enterprise_db?sslmode=disable"
 	fmt.Printf("  URL [%s]:\n  %s ", ui.Gray(defaultURL), ui.Cyan(">"))
 	dbURL, _ := reader.ReadString('\n')
 	dbURL = strings.TrimSpace(dbURL)
@@ -405,12 +406,24 @@ engine:
   concurrency: 4
 `, dbURL, intervalStr, mode, schemaPattern, quotaBytes, quotaGB)
 
-	if err := os.WriteFile("pgcaliper.yaml", []byte(yamlContent), 0644); err != nil {
-		return fmt.Errorf("failed writing pgcaliper.yaml: %w", err)
+	targetFile := "pgcaliper.yaml"
+	if os.Geteuid() == 0 {
+		_ = os.MkdirAll("/etc/pgcaliper", 0755)
+		if _, err := os.Stat("/etc/pgcaliper"); err == nil {
+			targetFile = "/etc/pgcaliper/pgcaliper.yaml"
+		}
 	}
 
-	fmt.Printf("\n  %s Generated configuration file %s\n", ui.Green("✓"), ui.Cyan("'pgcaliper.yaml'"))
-	fmt.Printf("  %s Run %s to execute your first storage calibration.\n\n", ui.Cyan("›"), ui.Green("./bin/pgcaliper scan"))
+	if err := os.WriteFile(targetFile, []byte(yamlContent), 0600); err != nil {
+		targetFile = "pgcaliper.yaml"
+		if err := os.WriteFile(targetFile, []byte(yamlContent), 0600); err != nil {
+			return fmt.Errorf("failed writing configuration file: %w", err)
+		}
+	}
+
+	absPath, _ := filepath.Abs(targetFile)
+	fmt.Printf("\n  %s Generated secure configuration (%s) at %s\n", ui.Green("✓"), ui.Yellow("chmod 600 - Owner Only"), ui.Cyan(fmt.Sprintf("'%s'", absPath)))
+	fmt.Printf("  %s Run %s to execute your first storage calibration.\n\n", ui.Cyan("›"), ui.Green("pgcaliper scan"))
 	return nil
 }
 
