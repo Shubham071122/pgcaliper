@@ -452,7 +452,7 @@ func runInitInteractive() error {
 	fmt.Println("    " + ui.Cyan("[1]") + " " + ui.White("Multi-Tenant Schemas") + " " + ui.Gray("(tenant_*, org_*, company_*) - [Recommended for Schema-per-Tenant]"))
 	fmt.Println("    " + ui.Cyan("[2]") + " " + ui.White("Database Fleet") + " " + ui.Gray("(One distinct database per customer)"))
 	fmt.Println("    " + ui.Cyan("[3]") + " " + ui.White("Custom Table Groups") + " " + ui.Gray("(Group tables by feature/domain: audit vs finance)"))
-	fmt.Println("    " + ui.Cyan("[4]") + " " + ui.White("Row-Level / Workspace Column") + " " + ui.Gray("(Single shared schema partitioned by workspace_id/tenant_id)"))
+	fmt.Println("    " + ui.Cyan("[4]") + " " + ui.White("Row-Level Multi-Tenancy") + " " + ui.Gray("(Single shared schema partitioned by org_id / tenant_id)"))
 
 	var stratChoice string
 	for {
@@ -541,7 +541,7 @@ func runInitInteractive() error {
 
 	case "4":
 		mode = "row_level"
-		defaultCol := "workspace_id"
+		defaultCol := "org_id"
 		for {
 			fmt.Printf("\n  • Enter Tenant Column Name [%s]:\n  %s ", ui.Gray(defaultCol), ui.Cyan(">"))
 			colInput, _ := reader.ReadString('\n')

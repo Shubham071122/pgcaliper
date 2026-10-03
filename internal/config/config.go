@@ -130,7 +130,7 @@ func LoadConfig(filePath string) (*Config, error) {
 		cfg.Strategy.Mode = "schema"
 	}
 	if cfg.Strategy.TenantColumn == "" {
-		cfg.Strategy.TenantColumn = "workspace_id"
+		cfg.Strategy.TenantColumn = "org_id"
 	}
 	if cfg.Strategy.DefaultQuotaBytes <= 0 {
 		cfg.Strategy.DefaultQuotaBytes = 15 * 1024 * 1024 * 1024
