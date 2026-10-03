@@ -26,7 +26,7 @@ import (
 	"pgcaliper/internal/ui"
 )
 
-const Version = "1.1.0"
+const Version = "1.1.1"
 
 func createPool(ctx context.Context, cfg *config.Config) (*pgxpool.Pool, error) {
 	poolConfig, err := pgxpool.ParseConfig(cfg.Database.URL)
@@ -262,25 +262,26 @@ func runDetails(cfg *config.Config, tenantID string) error {
 	return nil
 }
 
-func runUninstall(cfg *config.Config) error {
+func runClearData(cfg *config.Config) error {
 	reader := bufio.NewReader(os.Stdin)
 	ui.PrintBanner()
-	fmt.Println(ui.Yellow("  ▲ WARNING: You are about to completely remove the pgcaliper schema from PostgreSQL."))
-	fmt.Printf("  Target Schema to drop: %s\n\n", ui.Red(fmt.Sprintf("'%s'", cfg.Storage.Schema)))
-	fmt.Print(ui.White("  Are you sure you want to drop all historical storage telemetry? (y/N): "))
+	fmt.Println(ui.Yellow("  ▲ RESET/PURGE: This will drop the historical telemetry schema from PostgreSQL."))
+	fmt.Printf("  Target Database Schema: %s\n", ui.Red(fmt.Sprintf("'%s'", cfg.Storage.Schema)))
+	fmt.Println(ui.Gray("  (Your application tables, configs, and pgcaliper binary remain completely untouched)\n"))
+	fmt.Print(ui.White("  Are you sure you want to purge telemetry history? (y/N): "))
 
 	input, _ := reader.ReadString('\n')
 	input = strings.TrimSpace(strings.ToLower(input))
 
 	if input != "y" && input != "yes" {
-		fmt.Println(ui.Gray("\n  ✖ Uninstallation cancelled."))
+		fmt.Println(ui.Gray("\n  ✖ Purge cancelled."))
 		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	spinner := ui.StartSpinner(fmt.Sprintf("Dropping schema '%s' CASCADE from PostgreSQL...", cfg.Storage.Schema))
+	spinner := ui.StartSpinner(fmt.Sprintf("Dropping schema '%s' from PostgreSQL...", cfg.Storage.Schema))
 	pool, err := createPool(ctx, cfg)
 	if err != nil {
 		spinner.Stop("Connection failed", false)
@@ -294,7 +295,57 @@ func runUninstall(cfg *config.Config) error {
 		return err
 	}
 
-	spinner.Stop(fmt.Sprintf("Successfully dropped schema '%s'. Database is completely pristine.", cfg.Storage.Schema), true)
+	spinner.Stop(fmt.Sprintf("Schema '%s' dropped successfully from database.", cfg.Storage.Schema), true)
+	return nil
+}
+
+func runCompleteUninstall(configPath string) error {
+	reader := bufio.NewReader(os.Stdin)
+	ui.PrintBanner()
+	fmt.Println(ui.Red("  ▲ COMPLETE UNINSTALL: This will completely remove pgcaliper from your server."))
+	fmt.Println(ui.Gray("  Removes binary, configuration files, and database telemetry schema.\n"))
+
+	fmt.Print(ui.White("  1. Drop '_pgcaliper' schema from PostgreSQL database? (Y/n): "))
+	dbInput, _ := reader.ReadString('\n')
+	dbDrop := strings.TrimSpace(strings.ToLower(dbInput)) != "n"
+
+	if dbDrop {
+		cfg, err := config.LoadConfig(configPath)
+		if err == nil && cfg.Database.URL != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if pool, err := createPool(ctx, cfg); err == nil {
+				migrator := storage.NewMigrator(pool, cfg.Storage.Schema)
+				_ = migrator.DropSchema(ctx)
+				pool.Close()
+				fmt.Printf("  %s Dropped '%s' schema from PostgreSQL\n", ui.Green("✓"), cfg.Storage.Schema)
+			}
+			cancel()
+		}
+	}
+
+	fmt.Print(ui.White("  2. Remove configuration files (/etc/pgcaliper, pgcaliper.yaml)? (Y/n): "))
+	cfgInput, _ := reader.ReadString('\n')
+	if strings.TrimSpace(strings.ToLower(cfgInput)) != "n" {
+		_ = os.Remove("pgcaliper.yaml")
+		_ = os.RemoveAll("/etc/pgcaliper")
+		if home, err := os.UserHomeDir(); err == nil {
+			_ = os.RemoveAll(home + "/.config/pgcaliper")
+		}
+		fmt.Printf("  %s Removed configuration files\n", ui.Green("✓"))
+	}
+
+	fmt.Print(ui.White("  3. Remove pgcaliper executable binary (/usr/local/bin/pgcaliper)? (Y/n): "))
+	binInput, _ := reader.ReadString('\n')
+	if strings.TrimSpace(strings.ToLower(binInput)) != "n" {
+		execPath, err := os.Executable()
+		if err == nil {
+			_ = os.Remove(execPath)
+		}
+		_ = os.Remove("/usr/local/bin/pgcaliper")
+		fmt.Printf("  %s Removed binary executable\n", ui.Green("✓"))
+	}
+
+	fmt.Printf("\n  %s pgcaliper has been completely uninstalled. Goodbye!\n\n", ui.Green("✓"))
 	return nil
 }
 
@@ -828,13 +879,18 @@ func main() {
 			ui.PrintErrorWithHint(err)
 			os.Exit(1)
 		}
-	case "uninstall":
+	case "reset", "clear", "purge":
 		cfg, err := config.LoadConfig(*configPath)
 		if err != nil {
 			ui.PrintErrorWithHint(err)
 			os.Exit(1)
 		}
-		if err := runUninstall(cfg); err != nil {
+		if err := runClearData(cfg); err != nil {
+			ui.PrintErrorWithHint(err)
+			os.Exit(1)
+		}
+	case "uninstall":
+		if err := runCompleteUninstall(*configPath); err != nil {
 			ui.PrintErrorWithHint(err)
 			os.Exit(1)
 		}
