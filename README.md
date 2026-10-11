@@ -34,8 +34,8 @@ In multi-tenant SaaS platforms, shared databases, and enterprise applications, m
 │                                                                             │
 │  ┌───────────────────────┐  ┌───────────────────────┐  ┌─────────────────┐  │
 │  │   tenant_acme_corp    │  │   tenant_globex       │  │  public / app   │  │
-│  │   - invoices          │  │   - invoices          │  │  - users        │  │
-│  │   - vouchers          │  │   - vouchers          │  │  - audit_logs   │  │
+│  │   - orders            │  │   - orders            │  │  - users        │  │
+│  │   - documents         │  │   - documents         │  │  - audit_logs   │  │
 │  └───────────────────────┘  └───────────────────────┘  └─────────────────┘  │
 │                                                                             │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
@@ -143,10 +143,10 @@ strategy:
   mode: "row_level"
   tenant_column: "org_id" # or tenant_id
   tables:
-    - items
-    - invoices
-    - payments
-    - ledgers
+    - orders
+    - documents
+    - events
+    - files
   default_quota_bytes: 5368709120 # 5.00 GB
 ```
 > **Proportional Index Allocation:** `pgcaliper` computes each tenant's table heap contribution and proportionally allocates index storage (`Index_tenant = Index_table * (Heap_tenant / Heap_table)`).
@@ -184,9 +184,9 @@ strategy:
   mode: "custom_group"
   default_quota_bytes: 10737418240
   groups:
-    - name: "accounting"
-      tables: ["invoices", "vouchers", "payments"]
-    - name: "compliance_logs"
+    - name: "core_domain"
+      tables: ["orders", "documents", "files"]
+    - name: "telemetry_logs"
       tables: ["audit_events", "activity_logs"]
 ```
 
@@ -198,10 +198,14 @@ strategy:
 | :--- | :--- |
 | `pgcaliper init` | Launch interactive configuration wizard with live DB validation |
 | `pgcaliper scan` | Run immediate calibration scan and record snapshot to DB |
-| `pgcaliper daemon` | Start 24/7 background scheduler (Duration or Cron) |
-| `pgcaliper status` | Display latest recorded metrics from the database ledger |
+| `pgcaliper health` | Live daemon status, DB connection latency, and service state |
+| `pgcaliper doctor` | Pre-flight diagnostic checklist (permissions, indexes, missing columns, fixes) |
+| `pgcaliper ping` | Measure DB roundtrip latency and test webhook alert delivery |
+| `pgcaliper logs` | View historical calibration execution audit trail & run durations |
+| `pgcaliper status` | Display latest recorded metrics from telemetry storage |
 | `pgcaliper details --tenant=<id>` | Drill down into table-by-table heap vs index breakdown |
 | `pgcaliper export [--format=json|csv]` | Export telemetry records to stdout or file (`--output=report.json`) |
+| `pgcaliper daemon` | Start 24/7 background scheduler (Duration or Cron) |
 | `pgcaliper upgrade` | Check for newer releases and self-update the binary |
 | `pgcaliper reset` | Purge telemetry schema (`_pgcaliper`) while keeping configs & binary |
 | `pgcaliper uninstall` | Interactive teardown (removes binary, config files, and DB schema) |

@@ -10,11 +10,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"pgcaliper/internal/config"
 	"pgcaliper/internal/model"
+	"pgcaliper/internal/ui"
 )
 
 type Inspector struct {
-	pool *pgxpool.Pool
-	cfg  *config.Config
+	pool    *pgxpool.Pool
+	cfg     *config.Config
+	Verbose bool
 }
 
 func New(pool *pgxpool.Pool, cfg *config.Config) *Inspector {
@@ -22,6 +24,10 @@ func New(pool *pgxpool.Pool, cfg *config.Config) *Inspector {
 		pool: pool,
 		cfg:  cfg,
 	}
+}
+
+func (ins *Inspector) SetVerbose(v bool) {
+	ins.Verbose = v
 }
 
 func (ins *Inspector) GetDatabaseTotalSize(ctx context.Context) (int64, string, error) {
@@ -285,8 +291,10 @@ func (ins *Inspector) InspectRowLevelTenants(ctx context.Context, tenantColumn s
 			GROUP BY %s;
 		`, tenantColumn, tbl, tenantColumn, tenantColumn)
 
+		tblStart := time.Now()
 		rows, err := ins.pool.Query(ctx, query)
 		if err != nil {
+			fmt.Printf("  %s Table '%s' query error: %v\n", ui.Yellow("▲"), tbl, err)
 			continue
 		}
 
@@ -312,6 +320,9 @@ func (ins *Inspector) InspectRowLevelTenants(ctx context.Context, tenantColumn s
 			mu.Unlock()
 		}
 		rows.Close()
+		if ins.Verbose {
+			fmt.Printf("  [DEBUG] Scanned table '%s' in %s\n", tbl, time.Since(tblStart).Round(time.Millisecond))
+		}
 	}
 
 	var snapshots []*model.GroupSnapshot
@@ -404,7 +415,11 @@ func (ins *Inspector) RunInspection(ctx context.Context) ([]*model.GroupSnapshot
 				defer wg.Done()
 				for s := range schemaChan {
 					snap, err := ins.InspectSchema(ctx, s, quota)
-					if err == nil && snap != nil {
+					if err != nil {
+						if ins.Verbose {
+							fmt.Printf("  %s Failed inspecting schema '%s': %v\n", ui.Yellow("▲"), s, err)
+						}
+					} else if snap != nil {
 						mu.Lock()
 						snapshots = append(snapshots, snap)
 						mu.Unlock()

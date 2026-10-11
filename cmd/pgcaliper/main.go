@@ -20,6 +20,7 @@ import (
 	"pgcaliper/internal/alert"
 	"pgcaliper/internal/config"
 	"pgcaliper/internal/daemon"
+	"pgcaliper/internal/diagnostics"
 	"pgcaliper/internal/inspector"
 	"pgcaliper/internal/model"
 	"pgcaliper/internal/storage"
@@ -86,7 +87,7 @@ func exportSnapshots(snapshots []*model.GroupSnapshot, format string, outputPath
 	return nil
 }
 
-func runScan(cfg *config.Config, format string, output string) error {
+func runScan(cfg *config.Config, format string, output string, verbose bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -120,6 +121,7 @@ func runScan(cfg *config.Config, format string, output string) error {
 
 	repo := storage.NewRepository(pool, cfg.Storage.Schema)
 	ins := inspector.New(pool, cfg)
+	ins.SetVerbose(verbose)
 	dispatcher := alert.NewDispatcher(&cfg.Alerts)
 
 	if format == "" {
@@ -230,7 +232,7 @@ func runStatus(cfg *config.Config, format string, output string) error {
 		return exportSnapshots(ptrs, format, output)
 	}
 
-	fmt.Printf("  %s %s\n\n", ui.Cyan("›"), ui.White("Latest Storage State from Database Ledger:"))
+	fmt.Printf("  %s %s\n\n", ui.Cyan("›"), ui.White("Latest Recorded Storage Telemetry:"))
 	ui.RenderTable(ptrs)
 	return nil
 }
@@ -404,7 +406,7 @@ func runInitInteractive() error {
 
 	var dbURL string
 	var pool *pgxpool.Pool
-	defaultURL := "postgres://postgres:password123@localhost:5432/erp_enterprise_db?sslmode=disable"
+	defaultURL := "postgres://postgres:password@localhost:5432/production_db?sslmode=disable"
 
 	for {
 		ui.PrintStep(1, "PostgreSQL Connection URL", "Enter standard connection string (credentials, host, port, db name)")
@@ -489,7 +491,7 @@ func runInitInteractive() error {
 
 			var grpName string
 			for {
-				fmt.Printf("    • Group Name (e.g. accounting, logs):\n    %s ", ui.Cyan(">"))
+				fmt.Printf("    • Group Name (e.g. core_app, analytics):\n    %s ", ui.Cyan(">"))
 				nameInput, _ := reader.ReadString('\n')
 				grpName = strings.TrimSpace(nameInput)
 				if grpName == "" {
@@ -502,7 +504,7 @@ func runInitInteractive() error {
 
 			var validTables []string
 			for {
-				fmt.Printf("    • Enter table names (comma-separated, e.g. invoices, vouchers):\n    %s ", ui.Cyan(">"))
+				fmt.Printf("    • Enter table names (comma-separated, e.g. orders, documents, files):\n    %s ", ui.Cyan(">"))
 				tablesInput, _ := reader.ReadString('\n')
 				tablesInput = strings.TrimSpace(tablesInput)
 
@@ -567,7 +569,7 @@ func runInitInteractive() error {
 
 			if autoChoice == "n" || autoChoice == "no" {
 				for {
-					fmt.Printf("\n  • Enter table names manually (comma-separated, e.g. invoices, vouchers):\n  %s ", ui.Cyan(">"))
+					fmt.Printf("\n  • Enter table names manually (comma-separated, e.g. orders, documents, files):\n  %s ", ui.Cyan(">"))
 					manualTables, _ := reader.ReadString('\n')
 					manualTables = strings.TrimSpace(manualTables)
 
@@ -813,10 +815,15 @@ func main() {
 	format := fs.String("format", "", "Output format (json, csv)")
 	output := fs.String("output", "", "Output file path (optional)")
 	tenantFlag := fs.String("tenant", "", "Target tenant for details command")
+	verboseFlag := fs.Bool("verbose", false, "Enable verbose execution tracing")
 	_ = fs.Parse(os.Args[1:])
 
 	var tenantTarget string
+	isVerbose := *verboseFlag
 	for i := 1; i < len(os.Args); i++ {
+		if os.Args[i] == "-V" || os.Args[i] == "--verbose" {
+			isVerbose = true
+		}
 		if strings.HasPrefix(os.Args[i], "--format=") {
 			*format = strings.TrimPrefix(os.Args[i], "--format=")
 		} else if os.Args[i] == "--format" && i+1 < len(os.Args) {
@@ -857,7 +864,79 @@ func main() {
 			ui.PrintErrorWithHint(err)
 			os.Exit(1)
 		}
-		if err := runScan(cfg, *format, *output); err != nil {
+		if err := runScan(cfg, *format, *output, isVerbose); err != nil {
+			ui.PrintErrorWithHint(err)
+			os.Exit(1)
+		}
+	case "health":
+		cfg, err := config.LoadConfig(*configPath)
+		if err != nil {
+			ui.PrintErrorWithHint(err)
+			os.Exit(1)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		pool, err := createPool(ctx, cfg)
+		cancel()
+		if err != nil {
+			ui.PrintErrorWithHint(err)
+			os.Exit(1)
+		}
+		defer pool.Close()
+		if err := diagnostics.RunHealth(context.Background(), cfg, pool, *configPath); err != nil {
+			ui.PrintErrorWithHint(err)
+			os.Exit(1)
+		}
+	case "doctor":
+		cfg, err := config.LoadConfig(*configPath)
+		if err != nil {
+			ui.PrintErrorWithHint(err)
+			os.Exit(1)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		pool, err := createPool(ctx, cfg)
+		cancel()
+		if err != nil {
+			ui.PrintErrorWithHint(err)
+			os.Exit(1)
+		}
+		defer pool.Close()
+		if err := diagnostics.RunDoctor(context.Background(), cfg, pool); err != nil {
+			ui.PrintErrorWithHint(err)
+			os.Exit(1)
+		}
+	case "ping":
+		cfg, err := config.LoadConfig(*configPath)
+		if err != nil {
+			ui.PrintErrorWithHint(err)
+			os.Exit(1)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		pool, err := createPool(ctx, cfg)
+		cancel()
+		if err != nil {
+			ui.PrintErrorWithHint(err)
+			os.Exit(1)
+		}
+		defer pool.Close()
+		if err := diagnostics.RunPing(context.Background(), cfg, pool); err != nil {
+			ui.PrintErrorWithHint(err)
+			os.Exit(1)
+		}
+	case "logs":
+		cfg, err := config.LoadConfig(*configPath)
+		if err != nil {
+			ui.PrintErrorWithHint(err)
+			os.Exit(1)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		pool, err := createPool(ctx, cfg)
+		cancel()
+		if err != nil {
+			ui.PrintErrorWithHint(err)
+			os.Exit(1)
+		}
+		defer pool.Close()
+		if err := diagnostics.RunLogs(context.Background(), cfg, pool); err != nil {
 			ui.PrintErrorWithHint(err)
 			os.Exit(1)
 		}

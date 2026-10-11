@@ -272,21 +272,70 @@ func RenderTableDetails(snap *model.GroupSnapshot, tables []model.TableMetrics) 
 
 func PrintErrorWithHint(err error) {
 	errStr := err.Error()
-	fmt.Printf("\n  %s %s\n", Red("✖ ERROR:"), White(errStr))
 
-	if strings.Contains(errStr, "connect: connection refused") || strings.Contains(errStr, "dial tcp") {
-		fmt.Println(Yellow("\n  › Troubleshooting Hint:"))
-		fmt.Println("     • PostgreSQL might not be running on the specified host/port.")
-		fmt.Println("     • If running Docker test container, ensure: docker compose -f test/docker-compose.yml up -d")
-		fmt.Println("     • Check pg_hba.conf to verify TCP connections are accepted.")
-	} else if strings.Contains(errStr, "password authentication failed") {
-		fmt.Println(Yellow("\n  › Troubleshooting Hint:"))
-		fmt.Println("     • Invalid PostgreSQL username or password in connection string.")
-		fmt.Println("     • Check DATABASE_URL or pgcaliper.yaml credentials.")
-	} else if strings.Contains(errStr, "permission denied") {
-		fmt.Println(Yellow("\n  › Troubleshooting Hint:"))
-		fmt.Println("     • The database user lacks permission to create schema '_pgcaliper' or read tables.")
-		fmt.Println("     • Grant required privileges: GRANT CREATE ON DATABASE <db_name> TO <user>;")
+	// 1. Missing Configuration File
+	if strings.Contains(errStr, "no such file or directory") && (strings.Contains(errStr, "pgcaliper.yaml") || strings.Contains(errStr, "config file")) {
+		fmt.Printf("\n  %s %s\n", Red("✖"), White("Configuration file 'pgcaliper.yaml' not found."))
+		fmt.Println(Yellow("\n  › How to resolve:"))
+		fmt.Printf("     • Run '%s' to launch the interactive setup wizard.\n", Green("pgcaliper init"))
+		fmt.Println("     • Or specify an existing config: " + Cyan("pgcaliper <command> --config=/path/to/pgcaliper.yaml"))
+		fmt.Println()
+		return
 	}
-	fmt.Println()
+
+	// 2. Connection Refused / Database Unreachable
+	if strings.Contains(errStr, "connect: connection refused") || strings.Contains(errStr, "dial tcp") {
+		fmt.Printf("\n  %s %s\n", Red("✖ ERROR:"), White("Could not connect to PostgreSQL database (Connection Refused)."))
+		fmt.Println(Yellow("\n  › Troubleshooting:"))
+		fmt.Println("     • Ensure PostgreSQL is running on the host and port specified in pgcaliper.yaml.")
+		fmt.Println("     • If running in Docker: ensure the container is up ('docker ps').")
+		fmt.Println("     • Check pg_hba.conf to verify client TCP connections are permitted.")
+		fmt.Println()
+		return
+	}
+
+	// 3. Password Authentication Failed
+	if strings.Contains(errStr, "password authentication failed") {
+		fmt.Printf("\n  %s %s\n", Red("✖ ERROR:"), White("Database authentication failed (Invalid credentials)."))
+		fmt.Println(Yellow("\n  › Troubleshooting:"))
+		fmt.Println("     • Verify username and password in 'database.url' inside pgcaliper.yaml.")
+		fmt.Println("     • Special characters in password must be URL-encoded (e.g. '@' -> '%40').")
+		fmt.Println()
+		return
+	}
+
+	// 4. Missing Column / Table schema mismatch
+	if strings.Contains(errStr, "does not exist") && strings.Contains(errStr, "column") {
+		fmt.Printf("\n  %s %s\n", Red("✖ ERROR:"), White(errStr))
+		fmt.Println(Yellow("\n  › Troubleshooting:"))
+		fmt.Println("     • The tenant column configured in pgcaliper.yaml ('strategy.tenant_column') was not found in one of the tables.")
+		fmt.Println("     • Run " + Cyan("pgcaliper doctor") + " to automatically detect and validate column names across all tables.")
+		fmt.Println()
+		return
+	}
+
+	// 5. Query Circuit Breaker Timeout
+	if strings.Contains(errStr, "statement timeout") || strings.Contains(errStr, "canceling statement due to statement timeout") {
+		fmt.Printf("\n  %s %s\n", Red("✖ ERROR:"), White("Query terminated by circuit breaker ('statement_timeout')."))
+		fmt.Println(Yellow("\n  › Troubleshooting:"))
+		fmt.Println("     • A query exceeded the configured statement timeout to protect database performance.")
+		fmt.Println("     • You can increase 'database.statement_timeout' in pgcaliper.yaml (e.g., '30s').")
+		fmt.Println()
+		return
+	}
+
+	// 6. Permission Denied
+	if strings.Contains(errStr, "permission denied") {
+		fmt.Printf("\n  %s %s\n", Red("✖ ERROR:"), White(errStr))
+		fmt.Println(Yellow("\n  › Troubleshooting:"))
+		fmt.Println("     • The database user lacks permission to create schema '_pgcaliper' or inspect tables.")
+		fmt.Println("     • Run " + Cyan("pgcaliper doctor") + " for an automated permission diagnosis.")
+		fmt.Println("     • Grant required privileges: GRANT CREATE ON DATABASE <db_name> TO <user>;")
+		fmt.Println()
+		return
+	}
+
+	// Default fallback
+	fmt.Printf("\n  %s %s\n", Red("✖ ERROR:"), White(errStr))
+	fmt.Printf("  %s Run '%s' for system diagnostics or '%s' for usage.\n\n", Cyan("›"), Green("pgcaliper doctor"), Green("pgcaliper --help"))
 }
