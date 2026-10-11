@@ -204,7 +204,7 @@ strategy:
 | `pgcaliper logs` | View historical calibration execution audit trail & run durations |
 | `pgcaliper status` | Display latest recorded metrics from telemetry storage |
 | `pgcaliper details --tenant=<id>` | Drill down into table-by-table heap vs index breakdown |
-| `pgcaliper export [--format=json|csv]` | Export telemetry records to stdout or file (`--output=report.json`) |
+| `pgcaliper export [--format=json\|csv]` | Export telemetry records to stdout or file (`--output=report.json`) |
 | `pgcaliper daemon` | Start 24/7 background scheduler (Duration or Cron) |
 | `pgcaliper upgrade` | Check for newer releases and self-update the binary |
 | `pgcaliper reset` | Purge telemetry schema (`_pgcaliper`) while keeping configs & binary |

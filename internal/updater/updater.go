@@ -88,7 +88,12 @@ func Upgrade(currentVersion string) error {
 
 	dlSpinner := ui.StartSpinner(fmt.Sprintf("Downloading %s for %s/%s...", rel.TagName, runtime.GOOS, runtime.GOARCH))
 
-	client := &http.Client{Timeout: 60 * time.Second}
+	transport := &http.Transport{
+		ResponseHeaderTimeout: 30 * time.Second,
+	}
+	client := &http.Client{
+		Transport: transport,
+	}
 	resp, err := client.Get(downloadURL)
 	if err != nil {
 		dlSpinner.Stop("Download failed", false)
